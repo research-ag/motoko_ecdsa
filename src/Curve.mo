@@ -6,11 +6,14 @@
 /// import Curve "mo:ecdsa/Curve";
 /// ```
 
+import Array "mo:core@2/Array";
 import Debug "mo:core@2/Debug";
 import Int "mo:core@2/Int";
 import Iter "mo:core@2/Iter";
-import List "mo:core@2/List";
+import Blob "mo:core@2/Blob";
 import Nat "mo:core@2/Nat";
+import Nat8 "mo:core@2/Nat8";
+import VarArray "mo:core@2/VarArray";
 
 import Binary "./Binary";
 import Field "./Field";
@@ -84,6 +87,9 @@ module {
       case (#secp256k1) true;
       case (#prime256v1) false;
     };
+    // GLV endomorphism constant beta (secp256k1 only):
+    // `lambda * (x, y) = (beta * x, y)`.
+    let glvBeta : Nat = switch (GLV_CONSTANTS.rw) { case (#fp(b)) b };
 
     // Fast pseudo-Mersenne reduction modulo the secp256k1 prime
     // p = 2^256 - C, where C = 2^32 + 977.
@@ -171,17 +177,6 @@ module {
       let R = Nat.bitshiftLeft(1, 256);
       (R * R) % p_;
     } else 0;
-    // Mont-form encoding of the curve coefficient `a` (used in `dblM`).
-    let aMontP : Nat = if (isP256) {
-      let #fp(av) = a_;
-      // toMont(av) = REDC(av * R2M); inline since redcP isn't defined yet.
-      let t = av * R2M;
-      let tLo : Nat = t - Nat.bitshiftLeft(Nat.bitshiftRight(t, 256), 256);
-      let m = pPrime * tLo;
-      let mLo : Nat = m - Nat.bitshiftLeft(Nat.bitshiftRight(m, 256), 256);
-      let u = Nat.bitshiftRight(t + mLo * p_, 256);
-      if (u >= p_) u - p_ else u;
-    } else 0;
 
     // Montgomery reduction. Given t with 0 <= t < p * R, returns
     // t * R^{-1} mod p, fully reduced (< p).
@@ -193,17 +188,9 @@ module {
       if (u >= p_) u - p_ else u;
     };
 
-    // Mont multiplication / squaring / conversions.
-    func mulMontP(a : Nat, b : Nat) : Nat = redcP(a * b);
-    func sqrMontP(a : Nat) : Nat = redcP(a * a);
+    // Conversions into and out of the Montgomery domain.
     func toMontP(a : Nat) : Nat = redcP(a * R2M);
     func fromMontP(a : Nat) : Nat = redcP(a);
-    func addMontP(a : Nat, b : Nat) : Nat {
-      let s = a + b;
-      if (s >= p_) s - p_ else s;
-    };
-    func subMontP(a : Nat, b : Nat) : Nat = if (a >= b) a - b else a + p_ - b;
-    func _negMontP(a : Nat) : Nat = if (a == 0) 0 else p_ - a;
 
     /// Returns the bit-width of the curve's field. Both supported curves
     /// are 256-bit, so the only possible value is `#b256`. Reserved as a
@@ -494,178 +481,166 @@ module {
     /// Subtracts the Jacobi point `Q` from `P` (i.e. returns `P + (-Q)`).
     public func sub((px, py, pz) : Jacobi, (qx, qy, qz) : Jacobi) : Jacobi = add((px, py, pz), (qx, Fp.neg(qy), qz));
 
-    func mul_standard(a : Jacobi, #fr(k) : FrElt) : Jacobi {
-      // Handle special cases
-      if (k == 0 or isZero(a)) {
-        return zeroJ;
-      };
-
-      if (isP256) {
-        // Run the double-and-add loop in the Montgomery domain.
-        return mul_standardMontP(a, k);
-      };
-
-      // Simple double-and-add algorithm with window optimization for larger scalars
-      var result = zeroJ;
-      var doubling = a;
-      var scalar = k;
-
-      while (scalar > 0) {
-        if (scalar % 2 == 1) {
-          result := add(result, doubling);
-        };
-        doubling := dbl(doubling);
-        scalar /= 2;
-      };
-
-      return result;
-    };
-
-    // ===== Mont-form Jacobi arithmetic for prime256v1 =====
+    // ===== Internal point arithmetic on raw `Nat`s (scalar-mul hot path) =====
     //
-    // Points are stored as `(xM, yM, zM)` with each coordinate Mont-encoded
-    // (a stored as a*R mod p). The point at infinity is represented by zM = 0.
-    // `dblM` follows the same a=-3 Jacobian formula as `dbl`; `addM` mirrors
-    // `add`. All field ops are Mont-form (`mulMontP`, `sqrMontP`, etc.), and
-    // the linear ops (add/sub/neg) carry over unchanged because Mont encoding
-    // is linear.
+    // Coordinates are kept in the curve's working domain: plain residues
+    // mod p for secp256k1 (reduced with `reduceSecp`) and Montgomery form
+    // for prime256v1 (reduced with `redcP`). This avoids the `#fp` boxing
+    // and closure dispatch of the public `Fp` API in the inner loops.
+    // A point with `Z == 0` is the point at infinity; a point with
+    // `Z == oneN` is affine and takes the cheaper mixed-addition path.
 
-    type JacobiM = (Nat, Nat, Nat);
-    let zeroJM : JacobiM = (0, 0, 0);
+    type JacobiN = (Nat, Nat, Nat);
+    let zeroJN : JacobiN = (0, 0, 0);
+    let oneN : Nat = if (isP256) oneM else 1;
 
-    func _isZeroJM((_, _, z) : JacobiM) : Bool = z == 0;
+    func fmul(a : Nat, b : Nat) : Nat = if (isP256) redcP(a * b) else reduceSecp(a * b);
+    func fsqr(a : Nat) : Nat = if (isP256) redcP(a * a) else reduceSecp(a * a);
+    func fadd(a : Nat, b : Nat) : Nat {
+      let s = a + b;
+      if (s >= p_) s - p_ else s;
+    };
+    func fsub(a : Nat, b : Nat) : Nat = if (a >= b) a - b else a + p_ - b;
+    func fneg(a : Nat) : Nat = if (a == 0) 0 else p_ - a;
+    func toN(a : Nat) : Nat = if (isP256) toMontP(a) else a;
+    func fromN(a : Nat) : Nat = if (isP256) fromMontP(a) else a;
 
-    func dblM((x, y, z) : JacobiM) : JacobiM {
-      if (z == 0) return zeroJM;
-
-      let x2 = sqrMontP(x);
-      let y2 = sqrMontP(y);
-      let z2 = sqrMontP(z);
-
-      // S = 4*x*y^2
-      var S = mulMontP(x, y2);
-      S := addMontP(S, S);
-      S := addMontP(S, S);
-
-      // M = 3*x^2 + a*z^4   (a = -3 for p256, so always nonzero)
-      var M = addMontP(x2, x2);
-      M := addMontP(M, x2);
-      let z4 = sqrMontP(z2);
-      let az4 = mulMontP(aMontP, z4);
-      M := addMontP(M, az4);
-
-      // x' = M^2 - 2*S
-      var rx = sqrMontP(M);
-      rx := subMontP(rx, S);
-      rx := subMontP(rx, S);
-
-      // y' = M*(S - x') - 8*y^4
-      var y4 = sqrMontP(y2);
-      y4 := addMontP(y4, y4);
-      y4 := addMontP(y4, y4);
-      y4 := addMontP(y4, y4);
-
-      var ry = subMontP(S, rx);
-      ry := mulMontP(M, ry);
-      ry := subMontP(ry, y4);
-
-      // z' = 2*y*z
-      var rz = mulMontP(y, z);
-      rz := addMontP(rz, rz);
-
-      (rx, ry, rz);
+    func toJacobiN((#fp(x), #fp(y), #fp(z)) : Jacobi) : JacobiN {
+      if (z == 0) return zeroJN;
+      (toN(x), toN(y), toN(z));
     };
 
-    func addM((px, py, pz) : JacobiM, (qx, qy, qz) : JacobiM) : JacobiM {
+    func fromJacobiN((x, y, z) : JacobiN) : Jacobi {
+      if (z == 0) return zeroJ;
+      (#fp(fromN(x)), #fp(fromN(y)), #fp(fromN(z)));
+    };
+
+    // The curve coefficient `a` in the working domain.
+    let aN : Nat = switch (a_) { case (#fp(av)) toN(av) };
+
+    // Point doubling.
+    func dblN((x, y, z) : JacobiN) : JacobiN {
+      if (z == 0) return zeroJN;
+      let y2 = fsqr(y);
+      // S = 4*X*Y^2
+      var s = fmul(x, y2);
+      s := fadd(s, s);
+      s := fadd(s, s);
+      // M = 3*X^2 + a*Z^4
+      let x2 = fsqr(x);
+      let z2 = fsqr(z);
+      var m = fadd(fadd(x2, x2), x2);
+      if (aN != 0) m := fadd(m, fmul(aN, fsqr(z2)));
+      // X' = M^2 - 2*S
+      let rx = fsub(fsub(fsqr(m), s), s);
+      // Y' = M*(S - X') - 8*Y^4
+      var y4 = fsqr(y2);
+      y4 := fadd(y4, y4);
+      y4 := fadd(y4, y4);
+      y4 := fadd(y4, y4);
+      let ry = fsub(fmul(m, fsub(s, rx)), y4);
+      // Z' = 2*Y*Z
+      let rz = fmul(y, z);
+      (rx, ry, fadd(rz, rz));
+    };
+
+    // Point addition. When `Q` is affine (`qz == oneN`) the mixed formula
+    // saves four field multiplications.
+    func addN((px, py, pz) : JacobiN, (qx, qy, qz) : JacobiN) : JacobiN {
       if (pz == 0) return (qx, qy, qz);
       if (qz == 0) return (px, py, pz);
-      let isPzOne = pz == oneM;
-      let isQzOne = qz == oneM;
-      var r = if (isPzOne) oneM else sqrMontP(pz);
-      var U1 : Nat = 0;
-      var S1 : Nat = 0;
-      var H : Nat = 0;
-      if (isQzOne) {
-        U1 := px;
-        H := if (isPzOne) qx else mulMontP(qx, r);
-        H := subMontP(H, U1);
-        S1 := py;
-      } else {
-        S1 := sqrMontP(qz);
-        U1 := mulMontP(px, S1);
-        H := if (isPzOne) qx else mulMontP(qx, r);
-        H := subMontP(H, U1);
-        S1 := mulMontP(S1, qz);
-        S1 := mulMontP(S1, py);
+      let pz2 = fsqr(pz);
+      let u2 = fmul(qx, pz2);
+      let s2 = fmul(qy, fmul(pz, pz2));
+      let qAffine = qz == oneN;
+      var u1 = px;
+      var s1 = py;
+      if (not qAffine) {
+        let qz2 = fsqr(qz);
+        u1 := fmul(px, qz2);
+        s1 := fmul(py, fmul(qz, qz2));
       };
-      if (isPzOne) {
-        r := qy;
-      } else {
-        r := mulMontP(r, pz);
-        r := mulMontP(r, qy);
+      let h = fsub(u2, u1);
+      let r = fsub(s2, s1);
+      if (h == 0) {
+        return if (r == 0) dblN((px, py, pz)) else zeroJN;
       };
-      r := subMontP(r, S1);
-      if (H == 0) {
-        if (r == 0) {
-          return dblM((px, py, pz));
-        } else {
-          return zeroJM;
-        };
-      };
-      var rx : Nat = 0;
-      var ry : Nat = 0;
-      var rz : Nat = 0;
-      if (isPzOne) {
-        rz := if (isQzOne) H else mulMontP(H, qz);
-      } else {
-        if (isQzOne) {
-          rz := mulMontP(pz, H);
-        } else {
-          rz := mulMontP(pz, qz);
-          rz := mulMontP(rz, H);
-        };
-      };
-      var H3 = sqrMontP(H);
-      ry := sqrMontP(r);
-      U1 := mulMontP(U1, H3);
-      H3 := mulMontP(H3, H);
-      ry := subMontP(ry, U1);
-      ry := subMontP(ry, U1);
-      rx := subMontP(ry, H3);
-      U1 := subMontP(U1, rx);
-      U1 := mulMontP(U1, r);
-      H3 := mulMontP(H3, S1);
-      ry := subMontP(U1, H3);
+      let h2 = fsqr(h);
+      let h3 = fmul(h, h2);
+      let v = fmul(u1, h2);
+      let rx = fsub(fsub(fsub(fsqr(r), h3), v), v);
+      let ry = fsub(fmul(r, fsub(v, rx)), fmul(s1, h3));
+      let rz = if (qAffine) fmul(pz, h) else fmul(fmul(pz, qz), h);
       (rx, ry, rz);
     };
 
-    func toJacobiM((x, y, z) : Jacobi) : JacobiM {
-      let #fp(xn) = x;
-      let #fp(yn) = y;
-      let #fp(zn) = z;
-      if (zn == 0) return zeroJM;
-      (toMontP(xn), toMontP(yn), toMontP(zn));
+    // Window width of the wNAF scalar recoding and the resulting number of
+    // precomputed odd multiples, 2^(w-2).
+    let WNAF_W = 5;
+    let WNAF_SIZE = 8;
+
+    // A wNAF table maps a non-zero odd digit `d` to the point `d * P`.
+    type WnafTable = (d : Int) -> JacobiN;
+
+    // Wraps the odd multiples `P, 3P, 5P, ...` together with their negations.
+    func arrayTable(pos : [JacobiN]) : WnafTable {
+      let neg = pos.map(func((x, y, z) : JacobiN) : JacobiN = (x, fneg(y), z));
+      func(d) = if (d > 0) pos[Int.abs(d) / 2] else neg[Int.abs(d) / 2];
     };
 
-    func fromJacobiM((x, y, z) : JacobiM) : Jacobi {
-      if (z == 0) return zeroJ;
-      (#fp(fromMontP(x)), #fp(fromMontP(y)), #fp(fromMontP(z)));
-    };
-
-    func mul_standardMontP(a : Jacobi, k : Nat) : Jacobi {
-      var result = zeroJM;
-      var doubling = toJacobiM(a);
-      var scalar = k;
-
-      while (scalar > 0) {
-        if (scalar % 2 == 1) {
-          result := addM(result, doubling);
-        };
-        doubling := dblM(doubling);
-        scalar /= 2;
+    // The odd multiples P, 3P, ..., 15P.
+    func oddMultiples(p : JacobiN) : [JacobiN] {
+      let p2 = dblN(p);
+      let t = VarArray.repeat<JacobiN>(p, WNAF_SIZE);
+      var i = 1;
+      while (i < WNAF_SIZE) {
+        t[i] := addN(t[i - 1], p2);
+        i += 1;
       };
+      t.toArray();
+    };
 
-      fromJacobiM(result);
+    // GLV endomorphism (secp256k1 only): `lambda * (x, y) = (beta * x, y)`.
+    func lambdaN((x, y, z) : JacobiN) : JacobiN = (fmul(x, glvBeta), y, z);
+
+    // Tables for the terms of `k * P`: on secp256k1 the GLV endomorphism
+    // gives the second table for free. prime256v1 uses plain double-and-add,
+    // i.e. binary digits with the single-entry table `[P]`.
+    func tablesFor(p : JacobiN) : [WnafTable] {
+      if (not hasGLV) return [arrayTable([p])];
+      let pos = oddMultiples(p);
+      [arrayTable(pos), arrayTable(pos.map(lambdaN))];
+    };
+
+    // Digits matching `tablesFor`: two half-length wNAF scalars via the GLV
+    // split on secp256k1, the plain binary digits on prime256v1.
+    func nafsFor(k : Nat) : [[Int]] {
+      if (not hasGLV) return [Binary.fromNatReversed(k).map(func(b : Bool) : Int = if b 1 else 0)];
+      let (a, b) = split(k);
+      [Binary.toNafWidth(a, WNAF_W), Binary.toNafWidth(b, WNAF_W)];
+    };
+
+    // Evaluates `sum_j naf_j * P_j` with interleaved wNAF (Straus /
+    // Shamir's trick): all terms share a single chain of doublings.
+    func wnafSum(nafs : [[Int]], tables : [WnafTable]) : JacobiN {
+      var len = 0;
+      for (naf in nafs.values()) if (naf.size() > len) len := naf.size();
+      var acc = zeroJN;
+      var i = len;
+      while (i > 0) {
+        i -= 1;
+        acc := dblN(acc);
+        var j = 0;
+        while (j < nafs.size()) {
+          let naf = nafs[j];
+          if (i < naf.size()) {
+            let d = naf[i];
+            if (d != 0) acc := addN(acc, tables[j](d));
+          };
+          j += 1;
+        };
+      };
+      acc;
     };
 
     /// Returns the normalised affine `(x, y, z)` triple as hex strings.
@@ -682,12 +657,8 @@ module {
       (Fp.toNat(x), Fp.toNat(y), Fp.toNat(z));
     };
 
-    // GLV endomorphism functions - only used for secp256k1
-    func mulLambda((x, y, z) : Jacobi) : Jacobi {
-      assert (hasGLV); // Only valid for secp256k1
-      (Fp.mul(x, GLV_CONSTANTS.rw), y, z);
-    };
-
+    // Splits `k` into `(a, b)` with `k = a + b * lambda (mod r)` and both
+    // halves of roughly 128 bits.
     func split(x_ : Nat) : (Int, Int) {
       assert (hasGLV); // Only valid for secp256k1
       let x = x_ : Int;
@@ -698,94 +669,19 @@ module {
       (a, b);
     };
 
-    // Optimized multiplication using GLV endomorphism (only for secp256k1)
-    func mul_glv(x : Jacobi, #fr(y) : FrElt) : Jacobi {
-      assert (hasGLV);
-      let w = 5;
-      let tblSize : Nat = 2 ** (w - 2);
-      let u = split(y);
-      let naf0 = Binary.toNafWidth(u.0, w);
-      let naf1 = Binary.toNafWidth(u.1, w);
-      let maxBit = Nat.max(naf0.size(), naf1.size());
-      let tbl0 = List.empty<Jacobi>();
-      let tbl1 = List.empty<Jacobi>();
-      tbl0.add(x);
-      tbl1.add(mulLambda(x));
-      do {
-        let P2 = dbl(x);
-        var j = 1;
-        while (j < tblSize) {
-          tbl0.add(add(tbl0.at(j - 1 : Nat), P2));
-          tbl1.add(mulLambda(tbl0.at(j)));
-          j += 1;
-        };
-      };
-      var z = zeroJ;
-      let addTbl = func(tbl : List.List<Jacobi>, naf : [Int], i : Nat) {
-        if (i >= naf.size()) return;
-        let n = naf[i];
-        if (n > 0) {
-          let idx = Int.abs(n - 1) / 2;
-          z := add(z, tbl.at(idx));
-        } else if (n < 0) {
-          let idx = Int.abs(-n - 1) / 2;
-          z := add(z, neg(tbl.at(idx)));
-        };
-      };
-      do {
-        var i = 0;
-        while (i < maxBit) {
-          let bit = maxBit - 1 - i : Nat;
-          z := dbl(z);
-          addTbl(tbl0, naf0, bit);
-          addTbl(tbl1, naf1, bit);
-          i += 1;
-        };
-      };
-      z;
-    };
-
-    // Main multiplication function that chooses the appropriate algorithm
-    /// Computes `scalar * x` using GLV decomposition on secp256k1 and
-    /// double-and-add on prime256v1. Negative scalars (those above
-    /// `r/2`) are handled by negating both the input and the result.
-    /// Returns the point at infinity when the scalar is zero or `x` is
-    /// already the point at infinity.
-    public func mul(x : Jacobi, scalar : FrElt) : Jacobi {
-      let #fr(k) = scalar;
-
-      // Handle special cases
-      if (k == 0 or isZero(x)) {
-        return zeroJ;
-      };
-
-      // Check if scalar represents a negative value (greater than r/2)
-      let isNegative = k > params.rHalf;
-
-      if (isNegative) {
-        // Use the negated scalar value and negate the result
-        let positiveK = #fr(r_ - k : Nat);
-
-        // Use appropriate algorithm based on curve type
-        let result = if (hasGLV) {
-          mul_glv(x, positiveK);
-        } else {
-          mul_standard(x, positiveK);
-        };
-
-        return neg(result);
-      } else {
-        // Use appropriate algorithm based on curve type
-        if (hasGLV) {
-          return mul_glv(x, scalar);
-        } else {
-          return mul_standard(x, scalar);
-        };
-      };
+    /// Computes `scalar * x`: width-5 wNAF with the GLV endomorphism on
+    /// secp256k1, left-to-right double-and-add on prime256v1. Returns the point at infinity when the scalar is zero
+    /// or `x` is already the point at infinity.
+    public func mul(x : Jacobi, #fr(k) : FrElt) : Jacobi {
+      if (k == 0 or isZero(x)) return zeroJ;
+      fromJacobiN(wnafSum(nafsFor(k), tablesFor(toJacobiN(x))));
     };
 
     /// Computes `x * G`, the scalar multiple of the curve generator.
-    public func mul_base(x : FrElt) : Jacobi = mul(G_, x);
+    public func mul_base(#fr(k) : FrElt) : Jacobi {
+      if (k == 0) return zeroJ;
+      fromJacobiN(wnafSum(nafsFor(k), tablesFor(toJacobiN(G_))));
+    };
 
     /// Debug-prints a `Point` via `Debug.print`.
     public func putPoint(a : Point) {
