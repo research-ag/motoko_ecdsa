@@ -16,6 +16,8 @@ module {
         "sign",
         "verify",
         "verify_fresh",
+        "sign_precomputed",
+        "verify_precomputed",
       ];
       cols = ["secp256k1", "prime256v1"];
     };
@@ -40,6 +42,17 @@ module {
           case (#err e) Runtime.trap("setup: sign failed: " # e);
         };
         { priv; pub; sig };
+      },
+    );
+
+    // The same keys on curves that called `precompute(#both)`.
+    let preKeys = Array.tabulate<{ priv : ECDSA.PrivateKey; pub : ECDSA.PublicKey }>(
+      curves.size(),
+      func(ci) {
+        let curve = Curve.Curve(curves[ci].kind);
+        curve.precompute(#both);
+        let priv = ECDSA.PrivateKey(testPrivateKeyValue, curve);
+        { priv; pub = priv.getPublicKey() };
       },
     );
 
@@ -80,6 +93,23 @@ module {
             let fresh = ECDSA.PublicKey(pub.x, pub.y, Curve.Curve(curves[ci].kind));
             ignore fresh.verify(messageData.values(), sig);
           };
+        },
+      ),
+      // sign_precomputed
+      Array.tabulate<() -> ()>(
+        curves.size(),
+        func(ci) {
+          let priv = preKeys[ci].priv;
+          func() = ignore priv.sign(messageData.values(), randomData.values());
+        },
+      ),
+      // verify_precomputed
+      Array.tabulate<() -> ()>(
+        curves.size(),
+        func(ci) {
+          let pub = preKeys[ci].pub;
+          let sig = keys[ci].sig;
+          func() = ignore pub.verify(messageData.values(), sig);
         },
       ),
     ];

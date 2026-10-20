@@ -14,6 +14,9 @@ module {
         "mul_arbitrary",
         "mul_generator",
         "mul_generator_fresh",
+        "mul_generator_precomputed",
+        "precompute_sign",
+        "precompute_verify",
         "add",
         "double",
       ];
@@ -27,6 +30,7 @@ module {
 
     type Setup = {
       curve : Curve.Curve;
+      pre : Curve.Curve; // same curve after `precompute(#both)`
       point : Curve.Jacobi;
       gen : Curve.Jacobi;
       scalar : Curve.FrElt;
@@ -40,6 +44,11 @@ module {
         let pub = priv.getPublicKey();
         {
           curve;
+          pre = do {
+            let c = Curve.Curve(curve.kind);
+            c.precompute(#both);
+            c;
+          };
           point = curve.toJacobi(#affine(curve.Fp.fromNat(pub.x), curve.Fp.fromNat(pub.y)));
           gen = curve.G_;
           scalar = curve.Fr.fromNat(testScalarNat);
@@ -62,6 +71,10 @@ module {
       perCurve(func(s) = ignore s.curve.mul_base(s.scalar)),
       // Includes constructing a new `Curve`, as PEM/DER parsing does.
       perCurve(func(s) = ignore Curve.Curve(s.curve.kind).mul_base(s.scalar)),
+      perCurve(func(s) = ignore s.pre.mul_base(s.scalar)),
+      // One-time cost on a fresh `Curve`.
+      perCurve(func(s) = Curve.Curve(s.curve.kind).precompute(#sign)),
+      perCurve(func(s) = Curve.Curve(s.curve.kind).precompute(#verify)),
       perCurve(func(s) = ignore s.curve.add(s.point, s.gen)),
       perCurve(func(s) = ignore s.curve.dbl(s.point)),
     ];
