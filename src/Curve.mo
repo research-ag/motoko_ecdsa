@@ -643,6 +643,20 @@ module {
       acc;
     };
 
+    // Tables for the generator, built on first use and kept for the
+    // lifetime of this `Curve` instance.
+    var gTablesCache : ?[WnafTable] = null;
+    func gTables() : [WnafTable] {
+      switch (gTablesCache) {
+        case (?t) t;
+        case null {
+          let t = tablesFor(toJacobiN(G_));
+          gTablesCache := ?t;
+          t;
+        };
+      };
+    };
+
     /// Returns the normalised affine `(x, y, z)` triple as hex strings.
     /// Intended for debug printing.
     public func hexPoint(p : Jacobi) : (Text, Text, Text) {
@@ -680,7 +694,7 @@ module {
     /// Computes `x * G`, the scalar multiple of the curve generator.
     public func mul_base(#fr(k) : FrElt) : Jacobi {
       if (k == 0) return zeroJ;
-      fromJacobiN(wnafSum(nafsFor(k), tablesFor(toJacobiN(G_))));
+      fromJacobiN(wnafSum(nafsFor(k), gTables()));
     };
 
     /// Debug-prints a `Point` via `Debug.print`.
