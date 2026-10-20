@@ -80,7 +80,6 @@ module {
     let r_ = params.r;
     let a_ = params.a;
     let b_ = params.b;
-    let pSqrRoot_ = params.pSqrRoot;
 
     // Check if the curve supports GLV endomorphism
     let hasGLV = switch (kind) {
@@ -239,9 +238,26 @@ module {
     /// `(p+1)/4` exponent. Returns `null` if `x` is not a quadratic
     /// residue. Only correct for primes with `p ≡ 3 (mod 4)`, which both
     /// supported curves satisfy.
-    public func fpSqrRoot(x : FpElt) : ?FpElt {
-      let sq = Fp.pow(x, pSqrRoot_);
-      if (Fp.sqr(sq) == x) ?sq else null;
+    public func fpSqrRoot(#fp(x) : FpElt) : ?FpElt {
+      // Square-and-multiply in the working domain (fast reduction).
+      let xn = toN(x);
+      var s = oneN;
+      for (byte in pSqrRootBytes.values()) {
+        var bit : Nat8 = 0x80;
+        while (bit != 0) {
+          s := fsqr(s);
+          if (byte & bit != 0) s := fmul(s, xn);
+          bit >>= 1;
+        };
+      };
+      if (fsqr(s) == xn) ?#fp(fromN(s)) else null;
+    };
+    // The square-root exponent `(p+1)/4` (`params.pSqrRoot`) as 32
+    // big-endian bytes, so that its bits can be scanned without bignum
+    // operations.
+    let pSqrRootBytes : Blob = switch (kind) {
+      case (#secp256k1) "\3f\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\ff\bf\ff\ff\0c";
+      case (#prime256v1) "\3f\ff\ff\ff\c0\00\00\00\40\00\00\00\00\00\00\00\00\00\00\00\40\00\00\00\00\00\00\00\00\00\00\00";
     };
 
     /// Reads a 32-byte big-endian integer from `rand` and reduces it
