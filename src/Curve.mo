@@ -503,6 +503,12 @@ module {
     func fneg(a : Nat) : Nat = if (a == 0) 0 else p_ - a;
     func toN(a : Nat) : Nat = if (isP256) toMontP(a) else a;
     func fromN(a : Nat) : Nat = if (isP256) fromMontP(a) else a;
+    // Inverse in the working domain. In Montgomery form `inv(aR)` is
+    // `a^-1 R^-1`, so two `toMontP` steps turn it into `a^-1 R`.
+    func finv(a : Nat) : Nat {
+      let i = Field.inv_(a, p_);
+      if (isP256) toMontP(toMontP(i)) else i;
+    };
 
     func toJacobiN((#fp(x), #fp(y), #fp(z)) : Jacobi) : JacobiN {
       if (z == 0) return zeroJN;
@@ -575,6 +581,32 @@ module {
       (rx, ry, rz);
     };
 
+    // Converts points to affine form (`Z = oneN`) with a single field
+    // inversion (Montgomery's trick). No point may be the point at infinity.
+    func normalizeAllN(pts : [JacobiN]) : [JacobiN] {
+      let n = pts.size();
+      let prefix = VarArray.repeat<Nat>(0, n);
+      var acc = oneN;
+      var i = 0;
+      while (i < n) {
+        acc := fmul(acc, pts[i].2);
+        prefix[i] := acc;
+        i += 1;
+      };
+      var inv = finv(acc);
+      let out = VarArray.repeat<JacobiN>(zeroJN, n);
+      i := n;
+      while (i > 0) {
+        i -= 1;
+        let (x, y, z) = pts[i];
+        let zi = if (i == 0) inv else fmul(inv, prefix[i - 1]);
+        if (i > 0) inv := fmul(inv, z);
+        let zi2 = fsqr(zi);
+        out[i] := (fmul(x, zi2), fmul(y, fmul(zi2, zi)), oneN);
+      };
+      out.toArray();
+    };
+
     // Window width of the wNAF scalar recoding and the resulting number of
     // precomputed odd multiples, 2^(w-2).
     let WNAF_W = 5;
@@ -606,8 +638,9 @@ module {
 
     // Tables for the terms of `k * P`: on secp256k1 the GLV endomorphism
     // gives the second table for free.
-    func tablesFor(p : JacobiN) : [WnafTable] {
-      let pos = oddMultiples(p);
+    func tablesFor(p : JacobiN) : [WnafTable] = tablesOf(oddMultiples(p));
+
+    func tablesOf(pos : [JacobiN]) : [WnafTable] {
       if (not hasGLV) return [arrayTable(pos)];
       [arrayTable(pos), arrayTable(pos.map(lambdaN))];
     };
@@ -644,13 +677,14 @@ module {
     };
 
     // Tables for the generator, built on first use and kept for the
-    // lifetime of this `Curve` instance.
+    // lifetime of this `Curve` instance. They are normalised to affine
+    // form, so that every addition from them is a cheaper mixed addition.
     var gTablesCache : ?[WnafTable] = null;
     func gTables() : [WnafTable] {
       switch (gTablesCache) {
         case (?t) t;
         case null {
-          let t = tablesFor(toJacobiN(G_));
+          let t = tablesOf(normalizeAllN(oddMultiples(toJacobiN(G_))));
           gTablesCache := ?t;
           t;
         };
