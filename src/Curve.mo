@@ -731,6 +731,17 @@ module {
       fromJacobiN(wnafSum(nafsFor(k), gTables()));
     };
 
+    /// Computes `u1 * G + u2 * q` in a single pass that shares all
+    /// doublings between both terms (Shamir's trick). This is the core of
+    /// ECDSA verification.
+    public func mul_base_add(#fr(u1) : FrElt, q : Jacobi, #fr(u2) : FrElt) : Jacobi {
+      if (u2 == 0 or isZero(q)) return mul_base(#fr(u1));
+      if (u1 == 0) return mul(q, #fr(u2));
+      let nafs = nafsFor(u1).concat(nafsFor(u2));
+      let tables = gTables().concat(tablesFor(toJacobiN(q)));
+      fromJacobiN(wnafSum(nafs, tables));
+    };
+
     /// Debug-prints a `Point` via `Debug.print`.
     public func putPoint(a : Point) {
       switch (a) {
