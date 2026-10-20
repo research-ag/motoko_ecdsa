@@ -3,6 +3,7 @@ import Runtime "mo:core@2/Runtime";
 
 import Bench "mo:bench-helper";
 
+import Curve "../src/Curve";
 import ECDSA "../src";
 
 module {
@@ -14,6 +15,7 @@ module {
         "keyGeneration",
         "sign",
         "verify",
+        "verify_fresh",
       ];
       cols = ["secp256k1", "prime256v1"];
     };
@@ -65,6 +67,19 @@ module {
           let pub = keys[ci].pub;
           let sig = keys[ci].sig;
           func() = ignore pub.verify(messageData.values(), sig);
+        },
+      ),
+      // verify_fresh: includes constructing a new `Curve` and key, as
+      // PEM/DER parsing does.
+      Array.tabulate<() -> ()>(
+        curves.size(),
+        func(ci) {
+          let pub = keys[ci].pub;
+          let sig = keys[ci].sig;
+          func() {
+            let fresh = ECDSA.PublicKey(pub.x, pub.y, Curve.Curve(curves[ci].kind));
+            ignore fresh.verify(messageData.values(), sig);
+          };
         },
       ),
     ];

@@ -131,7 +131,7 @@ module {
       let u2 = curve.Fr.mul(#fr(signature.r), w);
       let xyz = (#fp(x), #fp(y), #fp(1)); // Z-coordinate should be 1 for affine point
       let true = curve.isValid(xyz) else return false;
-      let r = curve.add(curve.mul_base(u1), curve.mul(xyz, u2));
+      let r = curve.mul_base_add(u1, xyz, u2);
       switch (curve.fromJacobi(r)) {
         case (#zero) false;
         case (#affine(x, _)) curve.Fr.fromNat(curve.Fp.toNat(x)) == #fr(signature.r);

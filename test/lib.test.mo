@@ -1506,3 +1506,43 @@ test(
     };
   },
 );
+
+// Cross-checks the optimised scalar multiplication (`mul`, `mul_base`,
+// `mul_base_add`) against a plain double-and-add on the public `add`/`dbl`.
+test(
+  "scalar multiplication matches double-and-add reference",
+  func() {
+    for (curveKind in curveKinds.values()) {
+      let curve = Curve.Curve(curveKind);
+      let r = curve.params.r;
+      let refMul = func(p : Curve.Jacobi, k : Nat) : Curve.Jacobi {
+        var acc = curve.zeroJ;
+        var d = p;
+        var s = k;
+        while (s > 0) {
+          if (s % 2 == 1) acc := curve.add(acc, d);
+          d := curve.dbl(d);
+          s /= 2;
+        };
+        acc;
+      };
+      // A second point with Z != 1 to exercise the Jacobi -> internal path.
+      let q = curve.dbl(curve.add(curve.G_, curve.dbl(curve.G_))); // 6G
+      var k = 0x9e3779b97f4a7c15f39cc0605cedc8341082276bf3a27251f86c6a11d0c18e95 % r;
+      let scalars = [1, 2, 3, 15, 16, 17, r - 1 : Nat, r - 2 : Nat, curve.params.rHalf, curve.params.rHalf + 1, 2 ** 128, k];
+      for (s in scalars.values()) {
+        k := (k * 0x5851f42d4c957f2d + 0x14057b7ef767814f) % r;
+        let fs = curve.Fr.fromNat(s);
+        let fk = curve.Fr.fromNat(k);
+        assert curve.isEqual(curve.mul_base(fs), refMul(curve.G_, s));
+        assert curve.isEqual(curve.mul(q, fs), refMul(q, s));
+        assert curve.isEqual(
+          curve.mul_base_add(fs, q, fk),
+          curve.add(refMul(curve.G_, s), refMul(q, k)),
+        );
+      };
+      // u1*G + u2*Q cancelling to the point at infinity: Q = 6G, u2 = 1, u1 = -6.
+      assert curve.isZero(curve.mul_base_add(curve.Fr.fromNat(r - 6 : Nat), q, curve.Fr.fromNat(1)));
+    };
+  },
+);
