@@ -13,6 +13,7 @@ module {
       rows = [
         "mul_arbitrary",
         "mul_generator",
+        "mul_generator_fresh",
         "add",
         "double",
       ];
@@ -59,6 +60,8 @@ module {
     let routines : [[() -> ()]] = [
       perCurve(func(s) = ignore s.curve.mul(s.point, s.scalar)),
       perCurve(func(s) = ignore s.curve.mul_base(s.scalar)),
+      // Includes constructing a new `Curve`, as PEM/DER parsing does.
+      perCurve(func(s) = ignore Curve.Curve(s.curve.kind).mul_base(s.scalar)),
       perCurve(func(s) = ignore s.curve.add(s.point, s.gen)),
       perCurve(func(s) = ignore s.curve.dbl(s.point)),
     ];
