@@ -4,6 +4,7 @@
 /// import Binary "mo:ecdsa/Binary";
 /// ```
 
+import Int "mo:core@2/Int";
 import List "mo:core@2/List";
 
 module {
@@ -23,12 +24,12 @@ module {
   /// Returns the width-`w` non-adjacent form (wNAF) of the integer
   /// `x_`. Each digit is in `{0, ±1, ±3, ..., ±(2^(w-1)-1)}` and at
   /// least `w-1` zeros separate consecutive non-zero digits, allowing
-  /// scalar multiplication to amortise table look-ups. The width
-  /// parameter is currently fixed to `5` regardless of `_w`.
+  /// scalar multiplication to amortise table look-ups. `w_` must be at
+  /// least 2.
   // getNAF
-  public func toNafWidth(x_ : Int, _w : Int) : [Int] {
+  public func toNafWidth(x_ : Int, w_ : Int) : [Int] {
     let naf = List.empty<Int>();
-    let w = 5;
+    let w = Int.abs(w_);
     let signedMaxW : Int = 2 ** (w - 1);
     let maxW = signedMaxW * 2;
     let negative = x_ < 0;
