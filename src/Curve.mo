@@ -361,7 +361,6 @@ module {
 
       let x2 = Fp.sqr(x);
       let y2 = Fp.sqr(y);
-      let z2 = Fp.sqr(z);
 
       // S = 4*x*y^2
       var S = Fp.mul(x, y2);
@@ -374,7 +373,7 @@ module {
 
       if (a_ != #fp(0)) {
         // For prime256v1, a = -3
-        let z4 = Fp.sqr(z2);
+        let z4 = Fp.sqr(Fp.sqr(z));
         let az4 = Fp.mul(a_, z4);
         M := Fp.add(M, az4); // 3*x^2 + a*z^4
       };
@@ -515,10 +514,8 @@ module {
       (#fp(fromN(x)), #fp(fromN(y)), #fp(fromN(z)));
     };
 
-    // The curve coefficient `a` in the working domain.
-    let aN : Nat = switch (a_) { case (#fp(av)) toN(av) };
-
-    // Point doubling.
+    // Point doubling. Both curves have `a = 0` (secp256k1) or `a = -3`
+    // (prime256v1); for the latter `M = 3*X^2 + a*Z^4 = 3(X - Z^2)(X + Z^2)`.
     func dblN((x, y, z) : JacobiN) : JacobiN {
       if (z == 0) return zeroJN;
       let y2 = fsqr(y);
@@ -527,10 +524,14 @@ module {
       s := fadd(s, s);
       s := fadd(s, s);
       // M = 3*X^2 + a*Z^4
-      let x2 = fsqr(x);
-      let z2 = fsqr(z);
-      var m = fadd(fadd(x2, x2), x2);
-      if (aN != 0) m := fadd(m, fmul(aN, fsqr(z2)));
+      let m = if (isP256) {
+        let z2 = fsqr(z);
+        let t = fmul(fsub(x, z2), fadd(x, z2));
+        fadd(fadd(t, t), t);
+      } else {
+        let x2 = fsqr(x);
+        fadd(fadd(x2, x2), x2);
+      };
       // X' = M^2 - 2*S
       let rx = fsub(fsub(fsqr(m), s), s);
       // Y' = M*(S - X') - 8*Y^4
