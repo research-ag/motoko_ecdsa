@@ -605,18 +605,17 @@ module {
     func lambdaN((x, y, z) : JacobiN) : JacobiN = (fmul(x, glvBeta), y, z);
 
     // Tables for the terms of `k * P`: on secp256k1 the GLV endomorphism
-    // gives the second table for free. prime256v1 uses plain double-and-add,
-    // i.e. binary digits with the single-entry table `[P]`.
+    // gives the second table for free.
     func tablesFor(p : JacobiN) : [WnafTable] {
-      if (not hasGLV) return [arrayTable([p])];
       let pos = oddMultiples(p);
+      if (not hasGLV) return [arrayTable(pos)];
       [arrayTable(pos), arrayTable(pos.map(lambdaN))];
     };
 
-    // Digits matching `tablesFor`: two half-length wNAF scalars via the GLV
-    // split on secp256k1, the plain binary digits on prime256v1.
+    // wNAF digits matching `tablesFor`: two half-length scalars via the GLV
+    // split on secp256k1, one full-length scalar on prime256v1.
     func nafsFor(k : Nat) : [[Int]] {
-      if (not hasGLV) return [Binary.fromNatReversed(k).map(func(b : Bool) : Int = if b 1 else 0)];
+      if (not hasGLV) return [Binary.toNafWidth(k, WNAF_W)];
       let (a, b) = split(k);
       [Binary.toNafWidth(a, WNAF_W), Binary.toNafWidth(b, WNAF_W)];
     };
@@ -670,8 +669,8 @@ module {
       (a, b);
     };
 
-    /// Computes `scalar * x`: width-5 wNAF with the GLV endomorphism on
-    /// secp256k1, left-to-right double-and-add on prime256v1. Returns the point at infinity when the scalar is zero
+    /// Computes `scalar * x` with width-5 wNAF, using the GLV endomorphism
+    /// on secp256k1. Returns the point at infinity when the scalar is zero
     /// or `x` is already the point at infinity.
     public func mul(x : Jacobi, #fr(k) : FrElt) : Jacobi {
       if (k == 0 or isZero(x)) return zeroJ;
