@@ -1512,8 +1512,13 @@ test(
 test(
   "scalar multiplication matches double-and-add reference",
   func() {
-    for (curveKind in curveKinds.values()) {
+    let modes : [?{ #sign; #verify; #both }] = [null, ?#sign, ?#verify, ?#both];
+    for (curveKind in curveKinds.values()) for (mode in modes.values()) {
       let curve = Curve.Curve(curveKind);
+      switch (mode) {
+        case (?ops) curve.precompute(ops);
+        case null {};
+      };
       let r = curve.params.r;
       let refMul = func(p : Curve.Jacobi, k : Nat) : Curve.Jacobi {
         var acc = curve.zeroJ;
@@ -1543,6 +1548,30 @@ test(
       };
       // u1*G + u2*Q cancelling to the point at infinity: Q = 6G, u2 = 1, u1 = -6.
       assert curve.isZero(curve.mul_base_add(curve.Fr.fromNat(r - 6 : Nat), q, curve.Fr.fromNat(1)));
+    };
+  },
+);
+
+test(
+  "sign and verify with precomputed tables",
+  func() {
+    let msg : [Nat8] = [0x68, 0x65, 0x6c, 0x6c, 0x6f];
+    let rand : [Nat8] = [0x8a, 0xfa, 0x4a, 0x16, 0x2b, 0x7b, 0xad, 0x6c, 0x92, 0xff, 0x14, 0xf3, 0xa8, 0xbf, 0x4d, 0xb0, 0xf3, 0xc3, 0x9e, 0x90, 0xc0, 0x6f, 0x93, 0x78, 0x61, 0xf8, 0x23, 0xd2, 0x99, 0x5c, 0x74, 0xf0];
+    let d = 0x83ecb3984a4f9ff03e84d5f9c0d7f888a81833643047acc58eb6431e01d9bac8;
+    for (curveKind in curveKinds.values()) {
+      let plain = Curve.Curve(curveKind);
+      let pre = Curve.Curve(curveKind);
+      pre.precompute(#both);
+      pre.precompute(#both); // no-op
+      let privPlain = PrivateKey.PrivateKey(d, plain);
+      let privPre = PrivateKey.PrivateKey(d, pre);
+      let pubPre = privPre.getPublicKey();
+      assert pubPre.equal(PublicKey.PublicKey(privPlain.getPublicKey().x, privPlain.getPublicKey().y, pre));
+      let #ok(sigPlain) = privPlain.sign(msg.values(), rand.values()) else Runtime.unreachable();
+      let #ok(sigPre) = privPre.sign(msg.values(), rand.values()) else Runtime.unreachable();
+      assert sigPlain.r == sigPre.r and sigPlain.s == sigPre.s;
+      assert pubPre.verify(msg.values(), sigPre);
+      assert not pubPre.verify([0x68 : Nat8].values(), sigPre);
     };
   },
 );

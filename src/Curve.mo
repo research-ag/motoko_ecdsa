@@ -638,11 +638,14 @@ module {
     };
 
     // The odd multiples P, 3P, ..., 15P.
-    func oddMultiples(p : JacobiN) : [JacobiN] {
+    func oddMultiples(p : JacobiN) : [JacobiN] = oddMultiplesN(p, WNAF_SIZE);
+
+    // The first `n` odd multiples P, 3P, ..., (2n - 1)P.
+    func oddMultiplesN(p : JacobiN, n : Nat) : [JacobiN] {
       let p2 = dblN(p);
-      let t = VarArray.repeat<JacobiN>(p, WNAF_SIZE);
+      let t = VarArray.repeat<JacobiN>(p, n);
       var i = 1;
-      while (i < WNAF_SIZE) {
+      while (i < n) {
         t[i] := addN(t[i - 1], p2);
         i += 1;
       };
@@ -663,10 +666,12 @@ module {
 
     // wNAF digits matching `tablesFor`: two half-length scalars via the GLV
     // split on secp256k1, one full-length scalar on prime256v1.
-    func nafsFor(k : Nat) : [[Int]] {
-      if (not hasGLV) return [Binary.toNafWidth(k, WNAF_W)];
+    func nafsFor(k : Nat) : [[Int]] = nafsForW(k, WNAF_W);
+
+    func nafsForW(k : Nat, w : Nat) : [[Int]] {
+      if (not hasGLV) return [Binary.toNafWidth(k, w)];
       let (a, b) = split(k);
-      [Binary.toNafWidth(a, WNAF_W), Binary.toNafWidth(b, WNAF_W)];
+      [Binary.toNafWidth(a, w), Binary.toNafWidth(b, w)];
     };
 
     // Evaluates `sum_j naf_j * P_j` with interleaved wNAF (Straus /
@@ -741,10 +746,111 @@ module {
       fromJacobiN(wnafSum(nafsFor(k), tablesFor(toJacobiN(x))));
     };
 
+    // ===== Optional precomputation (see `precompute`) =====
+
+    // Fixed-base table: entry `8 * j + (i - 1)` is `i * 16^j * G`
+    // (j = 0..64, i = 1..8), affine.
+    var fixedTable : ?[JacobiN] = null;
+    // Width-8 wNAF tables of the generator: odd multiples G .. 127G, affine.
+    var wideGTables : ?[WnafTable] = null;
+    let WIDE_W = 8;
+    let WIDE_SIZE = 64;
+
+    /// Precomputes larger tables of multiples of the generator for this
+    /// instance, trading a one-time cost and some memory for faster later
+    /// calls:
+    ///
+    /// - `#sign`: a fixed-base table of 520 points. `mul_base` (signing,
+    ///   deriving a public key) then needs no doublings: about 45%
+    ///   (secp256k1) / 70% (prime256v1) faster. Costs about 290M / 360M
+    ///   instructions once, which pays off after roughly 14 / 6 signatures.
+    /// - `#verify`: width-8 wNAF tables of the generator (64 points, plus
+    ///   their GLV images on secp256k1), used by `mul_base_add`
+    ///   (verification) and by `mul_base` when there is no fixed-base table:
+    ///   verification about 5% faster. Costs about 41M / 49M instructions
+    ///   once, which pays off after roughly 12 / 8 verifications.
+    /// - `#both`: both of the above.
+    ///
+    /// This only pays off for an instance that is kept and used many times,
+    /// for example in an actor field (changes made in a query call are not
+    /// kept). Calling it again is cheap and does not rebuild existing
+    /// tables. Without calling it, all operations work as before.
+    public func precompute(ops : { #sign; #verify; #both }) {
+      switch (ops) {
+        case (#sign) buildFixedTable();
+        case (#verify) buildWideGTables();
+        case (#both) { buildFixedTable(); buildWideGTables() };
+      };
+    };
+
+    func buildFixedTable() {
+      switch (fixedTable) {
+        case (?_) return;
+        case null {};
+      };
+      let pts = VarArray.repeat<JacobiN>(zeroJN, 65 * 8);
+      var b = toJacobiN(G_);
+      var j = 0;
+      while (j < 65) {
+        var e = b;
+        var i = 0;
+        while (i < 8) {
+          if (i > 0) e := addN(e, b);
+          pts[8 * j + i] := e;
+          i += 1;
+        };
+        b := dblN(e); // 16 * b, as e = 8 * b
+        j += 1;
+      };
+      fixedTable := ?normalizeAllN(pts.toArray());
+    };
+
+    func buildWideGTables() {
+      switch (wideGTables) {
+        case (?_) return;
+        case null {};
+      };
+      wideGTables := ?tablesOf(normalizeAllN(oddMultiplesN(toJacobiN(G_), WIDE_SIZE)));
+    };
+
+    // The generator's wNAF width and tables: the wide ones if precomputed.
+    func gTablesW() : (Nat, [WnafTable]) = switch (wideGTables) {
+      case (?t) (WIDE_W, t);
+      case null (WNAF_W, gTables());
+    };
+
+    // `k * G` from the fixed-base table: `k` is recoded into signed
+    // radix-16 digits `d_j` in [-7, 8], and `k * G = sum_j d_j * 16^j * G`
+    // needs only table look-ups and mixed additions, no doublings.
+    func mulBaseFixed(table : [JacobiN], k : Nat) : JacobiN {
+      var acc = zeroJN;
+      var s = k;
+      var j = 0;
+      while (s > 0) {
+        let d = s % 16;
+        s /= 16;
+        if (d > 8) {
+          // Digit d - 16 < 0: subtract (16 - d) * 16^j * G and carry.
+          s += 1;
+          let (x, y, z) = table[8 * j + (16 - d : Nat) - 1];
+          acc := addN(acc, (x, fneg(y), z));
+        } else if (d > 0) {
+          acc := addN(acc, table[8 * j + d - 1]);
+        };
+        j += 1;
+      };
+      acc;
+    };
+
     /// Computes `x * G`, the scalar multiple of the curve generator.
     public func mul_base(#fr(k) : FrElt) : Jacobi {
       if (k == 0) return zeroJ;
-      fromJacobiN(wnafSum(nafsFor(k), gTables()));
+      switch (fixedTable) {
+        case (?t) return fromJacobiN(mulBaseFixed(t, k));
+        case null {};
+      };
+      let (w, tables) = gTablesW();
+      fromJacobiN(wnafSum(nafsForW(k, w), tables));
     };
 
     /// Computes `u1 * G + u2 * q` in a single pass that shares all
@@ -753,8 +859,9 @@ module {
     public func mul_base_add(#fr(u1) : FrElt, q : Jacobi, #fr(u2) : FrElt) : Jacobi {
       if (u2 == 0 or isZero(q)) return mul_base(#fr(u1));
       if (u1 == 0) return mul(q, #fr(u2));
-      let nafs = nafsFor(u1).concat(nafsFor(u2));
-      let tables = gTables().concat(tablesFor(toJacobiN(q)));
+      let (w, gt) = gTablesW();
+      let nafs = nafsForW(u1, w).concat(nafsFor(u2));
+      let tables = gt.concat(tablesFor(toJacobiN(q)));
       fromJacobiN(wnafSum(nafs, tables));
     };
 
